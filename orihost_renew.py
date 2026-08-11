@@ -26,12 +26,20 @@ PANEL_URL = "https://orihost.com"
 # 代理配置（可选）—— 解决 Cloudflare 拦截 / 数据中心 IP 被拒
 #   1. ORIHOST_PROXY="http://127.0.0.1:7890" — 显式指定
 #   2. HTTP_PROXY / HTTPS_PROXY              — 标准代理环境变量
+# 如果代理不可达，自动回退直连。
 # ============================================================
 ORIHOST_PROXY = os.environ.get("ORIHOST_PROXY") or ""
 PROXIES = {}
 if ORIHOST_PROXY:
     PROXIES = {"http": ORIHOST_PROXY, "https": ORIHOST_PROXY}
-    print(f"  🔗 使用 ORIHOST_PROXY: {ORIHOST_PROXY}")
+    print(f"  🔗 尝试使用 ORIHOST_PROXY: {ORIHOST_PROXY}")
+    # 检测代理是否可达，不可达则回退直连
+    try:
+        requests.get("http://www.gstatic.com/generate_204", proxies=PROXIES, timeout=5)
+        print(f"  ✅ 代理可用")
+    except Exception:
+        print(f"  ⚠️  代理不可达 ({ORIHOST_PROXY})，回退直连")
+        PROXIES = {}
 else:
     http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or ""
     https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
