@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (SeleniumBase UC + Xvfb 穿透版)
+# Orihost 自动续期脚本 (SeleniumBase UC + 物理点击过盾版)
 # ============================================================
 import os
 import sys
@@ -53,6 +53,7 @@ for i in range(1, 20):
             "server_ids": server_ids
         })
 
+# 向下兼容单账号
 if not ACCOUNTS:
     legacy_u = os.environ.get("ORIHOST_USERNAME", "").strip()
     legacy_p = os.environ.get("ORIHOST_PASSWORD", "").strip()
@@ -83,19 +84,26 @@ def send_telegram(message: str):
         print(f"  ❌ Telegram 发送失败: {e}", flush=True)
 
 
-def wait_turnstile_pass(driver, max_wait=15):
-    """等待页面上的 Cloudflare Turnstile 验证通过"""
-    for _ in range(max_wait):
+def solve_turnstile(driver, max_wait=20):
+    """检测并点击过 Cloudflare Turnstile"""
+    for i in range(max_wait):
         try:
             token = driver.execute_script("""
                 const el = document.querySelector('input[name="cf-turnstile-response"]');
                 return el ? el.value : null;
             """)
             if token and len(token) > 20:
-                print("  🛡️ Turnstile 验证已自动成功！", flush=True)
+                print("  🛡️ Turnstile 验证已顺利通过！", flush=True)
                 return True
         except Exception:
             pass
+
+        # 每隔 2 秒尝试一次物理定位点击
+        if i % 2 == 0:
+            try:
+                driver.uc_gui_click_captcha()
+            except Exception:
+                pass
         time.sleep(1)
     return False
 
@@ -109,7 +117,6 @@ def process_account(acc):
     print(f"\n{'='*40}\n🚀 正在处理 {label} (用户: {username[:3]}***)\n{'='*40}", flush=True)
     account_results = []
 
-    # headless=False 配合 Xvfb 运行，规避 PyAutoGUI 限制
     driver = Driver(uc=True, headless=False, proxy=UC_PROXY)
 
     try:
@@ -118,7 +125,7 @@ def process_account(acc):
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
         time.sleep(3)
 
-        # 定位用户名字段
+        # 定位用户名字段并输入
         user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
         driver.wait_for_element_visible(user_selector, timeout=25)
         
@@ -128,33 +135,35 @@ def process_account(acc):
         user_elem.send_keys(username)
         time.sleep(1)
 
-        # 定位密码框
+        # 定位密码框并输入
         pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
         pwd_elem.click()
         pwd_elem.clear()
         pwd_elem.send_keys(password)
         time.sleep(1)
 
-        print("  🛡️ 正在等待登录页 Turnstile 验证完成...", flush=True)
-        wait_turnstile_pass(driver, max_wait=12)
+        print("  🛡️ 正在进行登录页 Turnstile 物理识别与点击...", flush=True)
+        solve_turnstile(driver, max_wait=20)
+        time.sleep(2)
 
         print("  🔑 正在提交登录...", flush=True)
-        pwd_elem.send_keys(Keys.RETURN)
-        time.sleep(6)
+        try:
+            # 优先点击 Sign In 提交按钮
+            driver.click("button[type='submit']")
+        except Exception:
+            pwd_elem.send_keys(Keys.RETURN)
 
-        # 判断是否登录成功
-        if "/auth/login" in driver.current_url:
-            try:
-                driver.click("button[type='submit']")
-                time.sleep(6)
-            except Exception:
-                pass
+        # 等待页面离开 /auth/login
+        for _ in range(12):
+            if "/auth/login" not in driver.current_url:
+                break
+            time.sleep(1)
 
         if "/auth/login" in driver.current_url:
             body_text = driver.get_text("body")
             err_hint = "页面未跳转"
             for line in body_text.split("\n"):
-                if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "captcha"]):
+                if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "captcha", "turnstile"]):
                     err_hint = line.strip()
                     break
             print(f"  ❌ 登录未成功跳转，提示: {err_hint}", flush=True)
@@ -198,9 +207,9 @@ def process_account(acc):
             else:
                 time.sleep(5)
 
-            # 等待 Cloudflare Turnstile 并点击 Claim Renewal
-            print(f"  🛡️ 等待弹窗 Turnstile 人机验证通过...", flush=True)
-            wait_turnstile_pass(driver, max_wait=15)
+            # 等待 Cloudflare Turnstile 验证
+            print(f"  🛡️ 等待弹窗 Turnstile 验证通过...", flush=True)
+            solve_turnstile(driver, max_wait=20)
 
             claim_selector = "button:contains('Claim Renewal'), button:contains('Claim')"
             claim_clicked = False
