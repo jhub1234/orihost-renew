@@ -30,7 +30,17 @@ jobs:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           nohup bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh) > proxy.log 2>&1 &
-          sleep 6
+          
+          # 循环检测代理端口是否就绪（最多等待 30 秒）
+          for i in {1..30}; do
+            if nc -z 127.0.0.1 1080 2>/dev/null; then
+              echo "✅ SOCKS5 代理端口 1080 已就绪！"
+              break
+            fi
+            echo "⏳ 等待代理启动中 ($i/30)..."
+            sleep 1
+          done
+          
           cat proxy.log || true
 
       - name: Run Orihost Renew
@@ -49,6 +59,6 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
 
-          # SOCKS5 代理端口
+          # 代理端口
           ORIHOST_PROXY: socks5://127.0.0.1:1080
         run: python -u orihost_renew.py
