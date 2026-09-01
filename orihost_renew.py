@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (SeleniumBase UC + 弹窗精准识别版)
+# Orihost 自动续期脚本 (天数精准比对与动态反馈版)
 # ============================================================
 import os
+import re
 import sys
 import time
 import socket
@@ -53,7 +54,6 @@ for i in range(1, 20):
             "server_ids": server_ids
         })
 
-# 向下兼容单账号
 if not ACCOUNTS:
     legacy_u = os.environ.get("ORIHOST_USERNAME", "").strip()
     legacy_p = os.environ.get("ORIHOST_PASSWORD", "").strip()
@@ -105,6 +105,18 @@ def solve_turnstile(driver, max_wait=20):
                 pass
         time.sleep(1)
     return False
+
+
+def get_current_renewal_days(driver):
+    """从控制台页面提取当前剩余天数"""
+    try:
+        text = driver.get_text("body")
+        match = re.search(r"RENEWAL\s+IN\s+(\d+)\s+Days?", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    except Exception:
+        pass
+    return None
 
 
 def process_account(acc):
@@ -181,6 +193,10 @@ def process_account(acc):
             except Exception:
                 pass
 
+            days_before = get_current_renewal_days(driver)
+            if days_before is not None:
+                print(f"  📊 当前服务器剩余续期天数: {days_before} 天", flush=True)
+
             renew_elements = driver.find_elements(By.XPATH, renew_xpath)
             if not renew_elements:
                 print(f"  ⚠️ 控制台未加载出 Renew 按钮", flush=True)
@@ -190,13 +206,6 @@ def process_account(acc):
             print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
             renew_elements[0].click()
             time.sleep(3)
-
-            # 检查弹窗是否直接提示冷却/上限
-            modal_text = driver.get_text("body")
-            if any(k in modal_text.lower() for k in ["cooldown", "limit reached", "already renewed", "cannot renew"]):
-                print(f"  ⏭️ 该服务器当前处于冷却期或已达续期上限", flush=True)
-                account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达续期上限/冷却中")
-                continue
 
             # 点击 Read Article
             read_xpath = "//button[contains(., 'Read Article') or contains(., 'Article')]"
@@ -209,7 +218,6 @@ def process_account(acc):
                 print(f"  ⏳ 模拟阅读新闻文章，等待 17 秒...", flush=True)
                 time.sleep(17)
 
-                # 关闭弹出的文章标签页并切回
                 for handle in driver.window_handles:
                     if handle != main_window:
                         try:
@@ -227,7 +235,6 @@ def process_account(acc):
             solve_turnstile(driver, max_wait=20)
             time.sleep(2)
 
-            # 多策略寻找并点击 Claim Renewal
             claim_xpath = "//button[contains(., 'Claim') or contains(., 'claim') or contains(., 'Renewal')]"
             claim_clicked = False
 
@@ -236,7 +243,6 @@ def process_account(acc):
                 for btn in claim_elements:
                     if btn.is_displayed():
                         try:
-                            # 优先常规点击，若失败则用 JS 穿透点击
                             try:
                                 btn.click()
                             except Exception:
@@ -251,13 +257,25 @@ def process_account(acc):
 
             if claim_clicked:
                 time.sleep(4)
-                print(f"  🎉 点击 [Claim Renewal] 完成续期！", flush=True)
-                account_results.append(f"• 服务器 `{short_id}`: ✅ 续期成功 (+7天)")
+                # 刷新页面获取最新天数进行二次校验
+                driver.refresh()
+                time.sleep(4)
+                days_after = get_current_renewal_days(driver)
+                
+                if days_after is not None:
+                    if days_before is not None and days_after > days_before:
+                        print(f"  🎉 续期成功！天数由 {days_before} 天增加至 {days_after} 天", flush=True)
+                        account_results.append(f"• 服务器 `{short_id}`: ✅ 续期成功 ({days_before}天 ➜ {days_after}天)")
+                    else:
+                        print(f"  ⏭️ 当前已处于上限 (剩余 {days_after} 天)", flush=True)
+                        account_results.append(f"• 服务器 `{short_id}`: ⏭️ 维持满期 ({days_after}天)")
+                else:
+                    print(f"  ✅ 续期动作已触发完成", flush=True)
+                    account_results.append(f"• 服务器 `{short_id}`: ✅ 续期动作已完成")
             else:
-                # 再次检查页面文本确认是否是因为刚续期处于冷却
                 cur_text = driver.get_text("body")
-                if any(k in cur_text.lower() for k in ["cooldown", "limit", "renewed", "3 days", "7 days", "14 days"]):
-                    print(f"  ⏭️ 该服务器处于冷却期或已达续期上限（无需重复续期）", flush=True)
+                if "cooldown" in cur_text.lower() or "limit" in cur_text.lower():
+                    print(f"  ⏭️ 该服务器处于冷却期或已达上限", flush=True)
                     account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达上限/冷却中")
                 else:
                     print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
