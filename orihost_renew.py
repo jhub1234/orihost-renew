@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动登录与全真 UI 续期脚本 (强力反检测 + 诊断模式)
+# Orihost 自动登录与全真 UI 续期脚本 (React 表单深度适配版)
 # ============================================================
 import os
 import sys
@@ -107,7 +107,6 @@ def process_account(acc):
         )
         page = context.new_page()
 
-        # 注入反自动化检测脚手架
         page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """)
@@ -118,7 +117,7 @@ def process_account(acc):
             page.wait_for_selector("input[type='password']", timeout=30000)
             time.sleep(2)
 
-            # 定位用户名输入框
+            # 定位用户名字段
             user_input = None
             for sel in ["input[name='user']", "input[name='username']", "input[name='email']", "input[type='text']", "input[type='email']"]:
                 if page.locator(sel).count() > 0:
@@ -131,39 +130,57 @@ def process_account(acc):
                 browser.close()
                 return account_results
 
+            # 聚焦并输入用户名
             user_input.click()
             user_input.fill("")
             user_input.press_sequentially(username, delay=60)
+            user_input.evaluate("el => el.dispatchEvent(new Event('blur', { bubbles: true }))")
 
+            # 聚焦并输入密码
             pwd_input = page.locator("input[type='password']").first
             pwd_input.click()
             pwd_input.fill("")
             pwd_input.press_sequentially(password, delay=60)
+            pwd_input.evaluate("el => el.dispatchEvent(new Event('blur', { bubbles: true }))")
 
+            # 勾选记住我
             if page.locator("input[type='checkbox']").count() > 0:
                 try:
                     page.locator("input[type='checkbox']").first.check(timeout=2000)
                 except Exception:
                     pass
 
-            time.sleep(1)
-            print("  🔑 正在提交登录...", flush=True)
+            time.sleep(2)
+            print("  🔑 正在提交表单...", flush=True)
 
-            submit_btn = page.locator("button[type='submit']").first
-            if submit_btn.is_enabled():
-                submit_btn.click()
-            else:
+            # 强制解除可能残留的 disabled 状态并触发真实点击
+            page.evaluate("""
+                () => {
+                    const btn = document.querySelector('button[type="submit"]');
+                    if (btn) {
+                        btn.removeAttribute('disabled');
+                        btn.click();
+                    }
+                }
+            """)
+
+            # 监听页面跳转或表单返回
+            time.sleep(8)
+
+            # 判断是否登录成功
+            if "/auth/login" in page.url:
+                # 再次尝试回车提交
                 pwd_input.press("Enter")
+                time.sleep(6)
 
-            # 等待登录结果
-            time.sleep(10)
-
-            # 如果仍留在登录页，打印页面文本协助排错
             if "/auth/login" in page.url:
                 body_text = page.inner_text("body")
-                error_lines = [line.strip() for line in body_text.split("\n") if any(k in line.lower() for k in ["invalid", "incorrect", "password", "error", "turnstile", "captcha", "cloudflare"])]
-                err_hint = " | ".join(error_lines[:3]) if error_lines else "页面无明显报错，可能触发静默验证拦截"
-                print(f"  ❌ 登录未成功跳转，页面抓取提示: {err_hint}", flush=True)
+                error_lines = [
+                    line.strip() for line in body_text.split("\n")
+                    if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "error", "turnstile", "captcha"])
+                ]
+                err_hint = " | ".join(error_lines[:3]) if error_lines else "表单未触发跳转"
+                print(f"  ❌ 登录未成功跳转，页面提示: {err_hint}", flush=True)
                 account_results.append(f"• {label}: ❌ 登录失败 ({err_hint})")
                 browser.close()
                 return account_results
@@ -174,7 +191,7 @@ def process_account(acc):
             for sid in server_ids:
                 short_id = sid[:8]
                 server_url = f"{BASE_URL}/server/{short_id}"
-                print(f"\n🔄 [{short_id}] 正在打开服务器控制台: {server_url} ...", flush=True)
+                print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
                 page.goto(server_url, wait_until="domcontentloaded", timeout=60000)
                 time.sleep(4)
 
@@ -184,41 +201,40 @@ def process_account(acc):
                     account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
                     continue
 
-                print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
+                print(f"  👉 点击 [Renew] 按钮...", flush=True)
                 renew_btn.click()
                 time.sleep(2)
 
                 read_btn = page.locator("button:has-text('Read Article')").first
                 if read_btn.count() > 0:
-                    print(f"  📰 捕获到 [Read Article] 弹窗，准备点击并监听新标签页...", flush=True)
+                    print(f"  📰 点击 [Read Article] 并监听新标签页...", flush=True)
                     with context.expect_page() as new_page_info:
                         read_btn.click()
                     
                     try:
                         ad_page = new_page_info.value
-                        print(f"  ⏳ 已打开文章标签页，模拟阅读等待 16 秒...", flush=True)
+                        print(f"  ⏳ 模拟阅读等待 16 秒...", flush=True)
                         time.sleep(16)
                         ad_page.close()
-                        print(f"  🗞️ 文章阅读完毕，已关闭文章标签页", flush=True)
+                        print(f"  🗞️ 关闭文章页", flush=True)
                     except Exception:
-                        print(f"  ⏳ 未能捕获新标签页，直接等待 16 秒...", flush=True)
+                        print(f"  ⏳ 等待 16 秒...", flush=True)
                         time.sleep(16)
                 else:
-                    print(f"  ℹ️ 未出现 Read Article 按钮，直接等待 5 秒...", flush=True)
                     time.sleep(5)
 
                 page.bring_to_front()
                 time.sleep(2)
 
                 claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')").first
-                print(f"  🛡️ 正在等待 Cloudflare Turnstile 人机验证通过...", flush=True)
+                print(f"  🛡️ 等待 Cloudflare Turnstile 验证通过...", flush=True)
                 for _ in range(15):
                     if claim_btn.count() > 0 and claim_btn.is_enabled():
                         break
                     time.sleep(1)
 
                 if claim_btn.count() > 0 and claim_btn.is_enabled():
-                    print(f"  🎉 验证通过，点击 [Claim Renewal] 完成续期！", flush=True)
+                    print(f"  🎉 点击 [Claim Renewal] 完成续期！", flush=True)
                     claim_btn.click()
                     time.sleep(4)
                     print(f"  ✅ 服务器 {short_id} 续期成功！", flush=True)
@@ -227,7 +243,7 @@ def process_account(acc):
                     modal_text = page.locator("[role='dialog'], .modal, div").all_inner_texts()
                     full_text = " ".join(modal_text)
                     if "limit" in full_text.lower() or "cooldown" in full_text.lower():
-                        print(f"  ⏭️ 该服务器当前处于冷却期或已达续期上限", flush=True)
+                        print(f"  ⏭️ 该服务器处于冷却期或已达续期上限", flush=True)
                         account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达上限/冷却中")
                     else:
                         print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
