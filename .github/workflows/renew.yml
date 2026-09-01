@@ -29,7 +29,9 @@ jobs:
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+          nohup bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh) > proxy.log 2>&1 &
+          sleep 5
+          cat proxy.log || true
 
       - name: Run Orihost Renew
         env:
@@ -47,6 +49,6 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
 
-          # 代理 (sing-box 启动后自动映射本地端口)
+          # 代理 (sing-box 本地端口)
           ORIHOST_PROXY: http://127.0.0.1:1081
         run: python orihost_renew.py
