@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (SeleniumBase UC 穿透 Turnstile 版)
+# Orihost 自动续期脚本 (SeleniumBase UC + Xvfb 穿透版)
 # ============================================================
 import os
 import sys
@@ -83,6 +83,23 @@ def send_telegram(message: str):
         print(f"  ❌ Telegram 发送失败: {e}", flush=True)
 
 
+def wait_turnstile_pass(driver, max_wait=15):
+    """等待页面上的 Cloudflare Turnstile 验证通过"""
+    for _ in range(max_wait):
+        try:
+            token = driver.execute_script("""
+                const el = document.querySelector('input[name="cf-turnstile-response"]');
+                return el ? el.value : null;
+            """)
+            if token and len(token) > 20:
+                print("  🛡️ Turnstile 验证已自动成功！", flush=True)
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
 def process_account(acc):
     username = acc["username"]
     password = acc["password"]
@@ -92,20 +109,16 @@ def process_account(acc):
     print(f"\n{'='*40}\n🚀 正在处理 {label} (用户: {username[:3]}***)\n{'='*40}", flush=True)
     account_results = []
 
+    # headless=False 配合 Xvfb 运行，规避 PyAutoGUI 限制
     driver = Driver(uc=True, headless=False, proxy=UC_PROXY)
 
     try:
-        # 1. 访问登录页
+        # 1. 打开登录页面
         print(f"  🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
         time.sleep(3)
 
-        # 处理登录页 Cloudflare Turnstile 验证
-        print("  🛡️ 正在检测并自动突破 Turnstile 验证码...", flush=True)
-        driver.uc_gui_click_captcha()
-        time.sleep(3)
-
-        # 定位用户名输入框
+        # 定位用户名字段
         user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
         driver.wait_for_element_visible(user_selector, timeout=25)
         
@@ -122,9 +135,8 @@ def process_account(acc):
         pwd_elem.send_keys(password)
         time.sleep(1)
 
-        # 再次尝试过验证码
-        driver.uc_gui_click_captcha()
-        time.sleep(2)
+        print("  🛡️ 正在等待登录页 Turnstile 验证完成...", flush=True)
+        wait_turnstile_pass(driver, max_wait=12)
 
         print("  🔑 正在提交登录...", flush=True)
         pwd_elem.send_keys(Keys.RETURN)
@@ -132,7 +144,6 @@ def process_account(acc):
 
         # 判断是否登录成功
         if "/auth/login" in driver.current_url:
-            # 备选方案：尝试点击登录按钮
             try:
                 driver.click("button[type='submit']")
                 time.sleep(6)
@@ -179,7 +190,6 @@ def process_account(acc):
                 print(f"  ⏳ 模拟阅读文章，等待 16 秒...", flush=True)
                 time.sleep(16)
 
-                # 切回控制台标签页
                 for handle in driver.window_handles:
                     if handle != main_window:
                         driver.switch_to.window(handle)
@@ -190,8 +200,7 @@ def process_account(acc):
 
             # 等待 Cloudflare Turnstile 并点击 Claim Renewal
             print(f"  🛡️ 等待弹窗 Turnstile 人机验证通过...", flush=True)
-            driver.uc_gui_click_captcha()
-            time.sleep(3)
+            wait_turnstile_pass(driver, max_wait=15)
 
             claim_selector = "button:contains('Claim Renewal'), button:contains('Claim')"
             claim_clicked = False
