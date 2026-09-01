@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动登录与全真 UI 续期脚本 (React 表单深度适配版)
+# Orihost 自动登录与全真 UI 续期脚本 (含登录页 Turnstile 突破)
 # ============================================================
 import os
 import sys
@@ -81,6 +81,33 @@ def send_telegram(message: str):
         print(f"  ❌ Telegram 发送失败: {e}", flush=True)
 
 
+def solve_turnstile_if_present(page):
+    """检测并尝试通过页面的 Cloudflare Turnstile 验证框"""
+    try:
+        # 寻找 turnstile iframe 或 shadow 容器
+        for _ in range(12):
+            # 检查是否有 cf-turnstile-response 已经填充
+            token = page.evaluate("""() => {
+                const input = document.querySelector('input[name="cf-turnstile-response"]');
+                return input ? input.value : null;
+            }""")
+            if token and len(token) > 20:
+                print("  🛡️ Turnstile 验证已自动通过！", flush=True)
+                return True
+
+            # 尝试点击 turnstile iframe 内部的复选框
+            for frame in page.frames:
+                if "challenges.cloudflare.com" in frame.url or "turnstile" in frame.url:
+                    cb = frame.locator("input[type='checkbox'], span.mark, .ctp-checkbox-label").first
+                    if cb.count() > 0 and cb.is_visible():
+                        cb.click()
+                        time.sleep(2)
+            time.sleep(1)
+    except Exception:
+        pass
+    return False
+
+
 def process_account(acc):
     username = acc["username"]
     password = acc["password"]
@@ -117,7 +144,6 @@ def process_account(acc):
             page.wait_for_selector("input[type='password']", timeout=30000)
             time.sleep(2)
 
-            # 定位用户名字段
             user_input = None
             for sel in ["input[name='user']", "input[name='username']", "input[name='email']", "input[type='text']", "input[type='email']"]:
                 if page.locator(sel).count() > 0:
@@ -130,46 +156,45 @@ def process_account(acc):
                 browser.close()
                 return account_results
 
-            # 聚焦并输入用户名
+            # 模拟物理按键输入
             user_input.click()
             user_input.fill("")
-            user_input.press_sequentially(username, delay=60)
+            user_input.press_sequentially(username, delay=50)
             user_input.evaluate("el => el.dispatchEvent(new Event('blur', { bubbles: true }))")
 
-            # 聚焦并输入密码
             pwd_input = page.locator("input[type='password']").first
             pwd_input.click()
             pwd_input.fill("")
-            pwd_input.press_sequentially(password, delay=60)
+            pwd_input.press_sequentially(password, delay=50)
             pwd_input.evaluate("el => el.dispatchEvent(new Event('blur', { bubbles: true }))")
 
-            # 勾选记住我
             if page.locator("input[type='checkbox']").count() > 0:
                 try:
                     page.locator("input[type='checkbox']").first.check(timeout=2000)
                 except Exception:
                     pass
 
+            print("  🛡️ 正在等待并处理登录页人机验证 (Cloudflare Turnstile)...", flush=True)
+            solve_turnstile_if_present(page)
             time.sleep(2)
-            print("  🔑 正在提交表单...", flush=True)
 
-            # 强制解除可能残留的 disabled 状态并触发真实点击
-            page.evaluate("""
-                () => {
+            print("  🔑 正在提交登录表单...", flush=True)
+            submit_btn = page.locator("button[type='submit']").first
+            if submit_btn.is_enabled():
+                submit_btn.click()
+            else:
+                page.evaluate("""() => {
                     const btn = document.querySelector('button[type="submit"]');
-                    if (btn) {
-                        btn.removeAttribute('disabled');
-                        btn.click();
-                    }
-                }
-            """)
+                    if (btn) { btn.removeAttribute('disabled'); btn.click(); }
+                }""")
+                pwd_input.press("Enter")
 
-            # 监听页面跳转或表单返回
+            # 等待登录跳转
             time.sleep(8)
 
-            # 判断是否登录成功
             if "/auth/login" in page.url:
-                # 再次尝试回车提交
+                # 重新尝试一次
+                solve_turnstile_if_present(page)
                 pwd_input.press("Enter")
                 time.sleep(6)
 
@@ -177,9 +202,9 @@ def process_account(acc):
                 body_text = page.inner_text("body")
                 error_lines = [
                     line.strip() for line in body_text.split("\n")
-                    if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "error", "turnstile", "captcha"])
+                    if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "captcha", "turnstile"])
                 ]
-                err_hint = " | ".join(error_lines[:3]) if error_lines else "表单未触发跳转"
+                err_hint = " | ".join(error_lines[:2]) if error_lines else "页面未跳转"
                 print(f"  ❌ 登录未成功跳转，页面提示: {err_hint}", flush=True)
                 account_results.append(f"• {label}: ❌ 登录失败 ({err_hint})")
                 browser.close()
@@ -187,7 +212,7 @@ def process_account(acc):
 
             print(f"  ✅ 登录成功！进入后台页面: {page.url}", flush=True)
 
-            # 2. 遍历续期
+            # 2. 遍历续期每个服务器
             for sid in server_ids:
                 short_id = sid[:8]
                 server_url = f"{BASE_URL}/server/{short_id}"
@@ -201,7 +226,7 @@ def process_account(acc):
                     account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
                     continue
 
-                print(f"  👉 点击 [Renew] 按钮...", flush=True)
+                print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
                 renew_btn.click()
                 time.sleep(2)
 
@@ -226,8 +251,10 @@ def process_account(acc):
                 page.bring_to_front()
                 time.sleep(2)
 
+                print(f"  🛡️ 等待弹窗 Turnstile 验证通过...", flush=True)
+                solve_turnstile_if_present(page)
+
                 claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')").first
-                print(f"  🛡️ 等待 Cloudflare Turnstile 验证通过...", flush=True)
                 for _ in range(15):
                     if claim_btn.count() > 0 and claim_btn.is_enabled():
                         break
