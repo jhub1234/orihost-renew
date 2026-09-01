@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动登录与续期脚本 (Playwright + SOCKS5 强化版)
+# Orihost 自动登录与全自动 UI 交互续期脚本 (支持 Cloudflare Turnstile)
 # ============================================================
 import os
 import sys
 import time
 import requests
-from urllib.parse import unquote
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
 
@@ -18,7 +17,6 @@ ORIHOST_PROXY = os.environ.get("ORIHOST_PROXY", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
-# 整理代理配置
 REQUESTS_PROXIES = {}
 PLAYWRIGHT_PROXY = None
 
@@ -74,9 +72,15 @@ def send_telegram(message: str):
         print(f"  ❌ Telegram 发送失败: {e}", flush=True)
 
 
-def get_authenticated_session(username, password):
-    """通过 Playwright 模拟真实按键登录并提取 Session 与 XSRF Token"""
-    print(f"🚀 启动无头浏览器登录账号: {username} ...", flush=True)
+def process_account(acc):
+    """处理单个账号的登录及每个服务器的全真 UI 续期"""
+    username = acc["username"]
+    password = acc["password"]
+    server_ids = acc["server_ids"]
+    label = acc["label"]
+
+    print(f"\n{'='*40}\n🚀 正在处理 {label} (用户: {username[:3]}***)\n{'='*40}", flush=True)
+    account_results = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -91,17 +95,18 @@ def get_authenticated_session(username, password):
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 1440, "height": 900}
         )
         page = context.new_page()
 
         try:
-            print(f"  🌐 正在载入登录页: {LOGIN_URL} ...", flush=True)
+            # 1. 登录
+            print(f"  🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_selector("input[type='password']", timeout=30000)
             time.sleep(2)
 
-            # 模拟物理按键聚焦并逐字输入用户名/邮箱（触发 React 状态绑定）
+            # 输入用户名
             user_input = None
             for sel in ["input[name='user']", "input[name='username']", "input[name='email']", "input[type='text']", "input[type='email']"]:
                 if page.locator(sel).count() > 0:
@@ -109,19 +114,20 @@ def get_authenticated_session(username, password):
                     break
 
             if not user_input:
-                print("  ❌ 未定位到用户名输入框", flush=True)
+                print("  ❌ 未找到用户名输入框", flush=True)
+                account_results.append(f"• {label}: ❌ 找不到用户名输入框")
                 browser.close()
-                return None, None
+                return account_results
 
             user_input.click()
             user_input.press_sequentially(username, delay=50)
 
-            # 模拟物理按键输入密码
+            # 输入密码
             pwd_input = page.locator("input[type='password']").first
             pwd_input.click()
             pwd_input.press_sequentially(password, delay=50)
 
-            # 勾选记住我
+            # 记住我
             if page.locator("input[type='checkbox']").count() > 0:
                 try:
                     page.locator("input[type='checkbox']").first.check(timeout=2000)
@@ -129,132 +135,122 @@ def get_authenticated_session(username, password):
                     pass
 
             time.sleep(1)
-            print("  🔑 凭证输入完毕，正在提交...", flush=True)
+            print("  🔑 正在提交登录...", flush=True)
 
-            # 优先敲击回车提交，或等待按钮解除 disabled 后点击
-            try:
-                pwd_input.press("Enter")
-            except Exception:
-                pass
-
-            # 备用点击逻辑
             submit_btn = page.locator("button[type='submit']").first
             if submit_btn.is_enabled():
                 submit_btn.click()
+            else:
+                pwd_input.press("Enter")
 
-            # 等待登录后页面跳转
-            time.sleep(6)
-
-            cookies_list = context.cookies()
-            cookies_dict = {c["name"]: c["value"] for c in cookies_list}
-            xsrf_token = cookies_dict.get("XSRF-TOKEN", "")
-            if xsrf_token:
-                xsrf_token = unquote(xsrf_token)
-
-            has_session = any(k in cookies_dict for k in ["jexactyl_session", "pterodactyl_session", "session", "remember_web_"])
-            if not has_session:
-                print("❌ 登录失败：未捕获到有效 Session Cookie，请检查密码或是否有验证码拦截。", flush=True)
+            # 等待离开登录页
+            try:
+                page.wait_for_url(lambda u: "/auth/login" not in u, timeout=25000)
+                print(f"  ✅ 登录成功！进入后台页面", flush=True)
+            except Exception:
+                print(f"  ❌ 登录未成功跳转，当前 URL: {page.url}", flush=True)
+                account_results.append(f"• {label}: ❌ 登录失败（未离开登录页）")
                 browser.close()
-                return None, None
+                return account_results
 
-            print("✅ 登录成功，已获取实时 Session！", flush=True)
-            browser.close()
-            return cookies_dict, xsrf_token
+            # 2. 遍历续期每个服务器
+            for sid in server_ids:
+                short_id = sid[:8]
+                server_url = f"{BASE_URL}/server/{short_id}"
+                print(f"\n🔄 [{short_id}] 正在打开服务器控制台: {server_url} ...", flush=True)
+                page.goto(server_url, wait_until="domcontentloaded", timeout=60000)
+                time.sleep(4)
+
+                # 寻找 Renew 按钮
+                renew_btn = page.locator("button:has-text('Renew'), button:has-text('📅 Renew')").first
+                if renew_btn.count() == 0:
+                    print(f"  ⚠️ 未找到 Renew 按钮，可能非免费服务器或页面结构变动", flush=True)
+                    account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
+                    continue
+
+                print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
+                renew_btn.click()
+                time.sleep(2)
+
+                # 弹窗中点击 [Read Article]
+                read_btn = page.locator("button:has-text('Read Article')").first
+                if read_btn.count() > 0:
+                    print(f"  📰 捕获到 [Read Article] 弹窗，准备点击并监听新标签页...", flush=True)
+                    with context.expect_page() as new_page_info:
+                        read_btn.click()
+                    
+                    # 捕获弹出的文章新标签页
+                    try:
+                        ad_page = new_page_info.value
+                        print(f"  ⏳ 已打开文章标签页，模拟阅读等待 16 秒...", flush=True)
+                        time.sleep(16)
+                        ad_page.close()
+                        print(f"  🗞️ 文章阅读完毕，已关闭文章标签页", flush=True)
+                    except Exception:
+                        print(f"  ⏳ 未能捕获新标签页，直接等待 16 秒...", flush=True)
+                        time.sleep(16)
+                else:
+                    print(f"  ℹ️ 未出现 Read Article 按钮，直接等待 5 秒...", flush=True)
+                    time.sleep(5)
+
+                # 切回主页面，处理 Cloudflare 验证 & 点击 Claim Renewal
+                page.bring_to_front()
+                time.sleep(2)
+
+                # 等待 Claim Renewal 按钮出现或变为可用
+                claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')").first
+                
+                # 等待可能存在的 Cloudflare Turnstile 验证完毕 (最多等 15 秒)
+                print(f"  🛡️ 正在等待 Cloudflare Turnstile 人机验证通过...", flush=True)
+                for _ in range(15):
+                    if claim_btn.count() > 0 and claim_btn.is_enabled():
+                        break
+                    time.sleep(1)
+
+                if claim_btn.count() > 0 and claim_btn.is_enabled():
+                    print(f"  🎉 验证通过，点击 [Claim Renewal] 完成续期！", flush=True)
+                    claim_btn.click()
+                    time.sleep(4)
+                    print(f"  ✅ 服务器 {short_id} 续期流程已顺利执行！", flush=True)
+                    account_results.append(f"• 服务器 `{short_id}`: ✅ 续期成功 (+7天)")
+                else:
+                    # 检查是否已达上限
+                    modal_text = page.locator("[role='dialog'], .modal, div").all_inner_texts()
+                    full_text = " ".join(modal_text)
+                    if "limit" in full_text.lower() or "cooldown" in full_text.lower():
+                        print(f"  ⏭️ 该服务器当前处于冷却期或已达续期上限", flush=True)
+                        account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达上限/冷却中")
+                    else:
+                        print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
+                        account_results.append(f"• 服务器 `{short_id}`: ❌ Claim 按钮未就绪")
 
         except Exception as e:
-            print(f"❌ 浏览器登录流程出现异常: {e}", flush=True)
+            print(f"❌ 流程发生异常: {e}", flush=True)
+            account_results.append(f"• {label}: ❌ 执行异常: {str(e)[:60]}")
+        finally:
             browser.close()
-            return None, None
 
-
-def renew_server(cookies: dict, xsrf_token: str, server_id: str) -> dict:
-    """调用 API 完成服务器续期"""
-    headers = {
-        "accept": "application/json",
-        "accept-language": "zh-CN,zh;q=0.9",
-        "x-requested-with": "XMLHttpRequest",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "referer": f"{BASE_URL}/server/{server_id[:8]}",
-    }
-    if xsrf_token:
-        headers["x-xsrf-token"] = xsrf_token
-
-    # 1. 发起续期
-    begin_url = f"{BASE_URL}/api/client/servers/{server_id}/renew/begin"
-    print(f"\n🔄 [{server_id[:8]}] 开始续期流程...", flush=True)
-    try:
-        resp = requests.post(begin_url, headers=headers, cookies=cookies, proxies=REQUESTS_PROXIES or None, timeout=30)
-    except Exception as e:
-        return {"status": "error", "message": f"连接超时: {e}"}
-
-    if resp.status_code != 200:
-        return {"status": "error", "message": f"begin 失败 HTTP {resp.status_code}: {resp.text[:100]}"}
-
-    try:
-        data = resp.json()
-    except Exception:
-        return {"status": "error", "message": "响应解析失败"}
-
-    dwell_seconds = data.get("dwell_seconds", 15)
-    print(f"  ⏳ 正在模拟阅读文章，等待 {dwell_seconds + 1} 秒...", flush=True)
-    time.sleep(dwell_seconds + 1)
-
-    # 2. 完成续期
-    complete_url = f"{BASE_URL}/api/client/renewal/complete"
-    try:
-        resp2 = requests.get(complete_url, headers=headers, cookies=cookies, proxies=REQUESTS_PROXIES or None, timeout=30)
-    except Exception as e:
-        return {"status": "error", "message": f"complete 异常: {e}"}
-
-    if resp2.status_code != 200:
-        return {"status": "error", "message": f"complete 失败 HTTP {resp2.status_code}"}
-
-    try:
-        result = resp2.json()
-    except Exception:
-        result = {}
-
-    renewed = result.get("renewed_count", 0)
-    skipped = result.get("skipped_count", 0)
-
-    if renewed > 0:
-        return {"status": "success", "message": f"续期成功 (+{renewed})"}
-    elif skipped > 0:
-        return {"status": "skipped", "message": "已达续期上限 (Limit Reached)"}
-    else:
-        return {"status": "unknown", "message": f"未知响应: {result}"}
+    return account_results
 
 
 def main():
     print("=" * 45, flush=True)
-    print(" Orihost 自动登录与续期任务", flush=True)
+    print(" Orihost 自动登录与全真 UI 续期任务", flush=True)
     print("=" * 45, flush=True)
 
-    all_results = []
-    status_map = {
-        "success": "✅ 续期成功",
-        "skipped": "⏭️ 已达上限",
-        "error": "❌ 续期失败",
-        "unknown": "⚠️ 状态异常",
-    }
-
+    all_summary = []
     for acc in ACCOUNTS:
-        print(f"\n--- 正在处理 {acc['label']} ---", flush=True)
-        cookies, xsrf_token = get_authenticated_session(acc["username"], acc["password"])
-        if not cookies:
-            all_results.append(f"• {acc['label']}: ❌ 登录失败")
-            continue
-
-        for sid in acc["server_ids"]:
-            res = renew_server(cookies, xsrf_token, sid)
-            st_text = status_map.get(res["status"], "❌ 续期失败")
-            print(f"  📌 结果: {st_text} ({res.get('message')})", flush=True)
-            all_results.append(f"• 服务器 `{sid[:8]}`: {st_text}\n  └ 详情: {res.get('message')}")
+        results = process_account(acc)
+        all_summary.extend(results)
 
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
-    summary = f"🖥 *Orihost 服务器自动续期汇总*\n\n" + "\n\n".join(all_results) + f"\n\n⏰ 执行时间: `{now}`"
-    send_telegram(summary)
-    print("\n✅ 所有任务处理完毕！", flush=True)
+    summary_text = (
+        f"🖥 *Orihost 服务器自动续期汇总*\n\n"
+        + "\n".join(all_summary)
+        + f"\n\n⏰ 执行时间: `{now}`"
+    )
+    send_telegram(summary_text)
+    print("\n✅ 所有任务执行完毕！", flush=True)
 
 
 if __name__ == "__main__":
