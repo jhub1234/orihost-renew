@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动登录与全真 UI 续期脚本 (含登录页 Turnstile 突破)
+# Orihost 自动续期脚本 (SeleniumBase UC 穿透 Turnstile 版)
 # ============================================================
 import os
 import sys
@@ -9,7 +9,9 @@ import time
 import socket
 import requests
 from datetime import datetime, timezone, timedelta
-from playwright.sync_api import sync_playwright
+from seleniumbase import Driver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 
 BASE_URL = "https://panel.orihost.com"
 LOGIN_URL = f"{BASE_URL}/auth/login"
@@ -29,9 +31,9 @@ def is_proxy_alive(proxy_str: str) -> bool:
     except Exception:
         return False
 
-PLAYWRIGHT_PROXY = None
+UC_PROXY = None
 if ORIHOST_PROXY and is_proxy_alive(ORIHOST_PROXY):
-    PLAYWRIGHT_PROXY = {"server": ORIHOST_PROXY}
+    UC_PROXY = ORIHOST_PROXY
     print(f"🔗 代理检测正常，已启用: {ORIHOST_PROXY}", flush=True)
 else:
     if ORIHOST_PROXY:
@@ -81,33 +83,6 @@ def send_telegram(message: str):
         print(f"  ❌ Telegram 发送失败: {e}", flush=True)
 
 
-def solve_turnstile_if_present(page):
-    """检测并尝试通过页面的 Cloudflare Turnstile 验证框"""
-    try:
-        # 寻找 turnstile iframe 或 shadow 容器
-        for _ in range(12):
-            # 检查是否有 cf-turnstile-response 已经填充
-            token = page.evaluate("""() => {
-                const input = document.querySelector('input[name="cf-turnstile-response"]');
-                return input ? input.value : null;
-            }""")
-            if token and len(token) > 20:
-                print("  🛡️ Turnstile 验证已自动通过！", flush=True)
-                return True
-
-            # 尝试点击 turnstile iframe 内部的复选框
-            for frame in page.frames:
-                if "challenges.cloudflare.com" in frame.url or "turnstile" in frame.url:
-                    cb = frame.locator("input[type='checkbox'], span.mark, .ctp-checkbox-label").first
-                    if cb.count() > 0 and cb.is_visible():
-                        cb.click()
-                        time.sleep(2)
-            time.sleep(1)
-    except Exception:
-        pass
-    return False
-
-
 def process_account(acc):
     username = acc["username"]
     password = acc["password"]
@@ -117,170 +92,138 @@ def process_account(acc):
     print(f"\n{'='*40}\n🚀 正在处理 {label} (用户: {username[:3]}***)\n{'='*40}", flush=True)
     account_results = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            proxy=PLAYWRIGHT_PROXY,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
-            ]
-        )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1440, "height": 900}
-        )
-        page = context.new_page()
+    driver = Driver(uc=True, headless=False, proxy=UC_PROXY)
 
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """)
+    try:
+        # 1. 访问登录页
+        print(f"  🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
+        driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+        time.sleep(3)
 
-        try:
-            print(f"  🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_selector("input[type='password']", timeout=30000)
-            time.sleep(2)
+        # 处理登录页 Cloudflare Turnstile 验证
+        print("  🛡️ 正在检测并自动突破 Turnstile 验证码...", flush=True)
+        driver.uc_gui_click_captcha()
+        time.sleep(3)
 
-            user_input = None
-            for sel in ["input[name='user']", "input[name='username']", "input[name='email']", "input[type='text']", "input[type='email']"]:
-                if page.locator(sel).count() > 0:
-                    user_input = page.locator(sel).first
-                    break
+        # 定位用户名输入框
+        user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
+        driver.wait_for_element_visible(user_selector, timeout=25)
+        
+        user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
+        user_elem.click()
+        user_elem.clear()
+        user_elem.send_keys(username)
+        time.sleep(1)
 
-            if not user_input:
-                print("  ❌ 未找到用户名输入框", flush=True)
-                account_results.append(f"• {label}: ❌ 找不到用户名输入框")
-                browser.close()
-                return account_results
+        # 定位密码框
+        pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+        pwd_elem.click()
+        pwd_elem.clear()
+        pwd_elem.send_keys(password)
+        time.sleep(1)
 
-            # 模拟物理按键输入
-            user_input.click()
-            user_input.fill("")
-            user_input.press_sequentially(username, delay=50)
-            user_input.evaluate("el => el.dispatchEvent(new Event('blur', { bubbles: true }))")
+        # 再次尝试过验证码
+        driver.uc_gui_click_captcha()
+        time.sleep(2)
 
-            pwd_input = page.locator("input[type='password']").first
-            pwd_input.click()
-            pwd_input.fill("")
-            pwd_input.press_sequentially(password, delay=50)
-            pwd_input.evaluate("el => el.dispatchEvent(new Event('blur', { bubbles: true }))")
+        print("  🔑 正在提交登录...", flush=True)
+        pwd_elem.send_keys(Keys.RETURN)
+        time.sleep(6)
 
-            if page.locator("input[type='checkbox']").count() > 0:
-                try:
-                    page.locator("input[type='checkbox']").first.check(timeout=2000)
-                except Exception:
-                    pass
-
-            print("  🛡️ 正在等待并处理登录页人机验证 (Cloudflare Turnstile)...", flush=True)
-            solve_turnstile_if_present(page)
-            time.sleep(2)
-
-            print("  🔑 正在提交登录表单...", flush=True)
-            submit_btn = page.locator("button[type='submit']").first
-            if submit_btn.is_enabled():
-                submit_btn.click()
-            else:
-                page.evaluate("""() => {
-                    const btn = document.querySelector('button[type="submit"]');
-                    if (btn) { btn.removeAttribute('disabled'); btn.click(); }
-                }""")
-                pwd_input.press("Enter")
-
-            # 等待登录跳转
-            time.sleep(8)
-
-            if "/auth/login" in page.url:
-                # 重新尝试一次
-                solve_turnstile_if_present(page)
-                pwd_input.press("Enter")
+        # 判断是否登录成功
+        if "/auth/login" in driver.current_url:
+            # 备选方案：尝试点击登录按钮
+            try:
+                driver.click("button[type='submit']")
                 time.sleep(6)
+            except Exception:
+                pass
 
-            if "/auth/login" in page.url:
-                body_text = page.inner_text("body")
-                error_lines = [
-                    line.strip() for line in body_text.split("\n")
-                    if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "captcha", "turnstile"])
-                ]
-                err_hint = " | ".join(error_lines[:2]) if error_lines else "页面未跳转"
-                print(f"  ❌ 登录未成功跳转，页面提示: {err_hint}", flush=True)
-                account_results.append(f"• {label}: ❌ 登录失败 ({err_hint})")
-                browser.close()
-                return account_results
+        if "/auth/login" in driver.current_url:
+            body_text = driver.get_text("body")
+            err_hint = "页面未跳转"
+            for line in body_text.split("\n"):
+                if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "captcha"]):
+                    err_hint = line.strip()
+                    break
+            print(f"  ❌ 登录未成功跳转，提示: {err_hint}", flush=True)
+            account_results.append(f"• {label}: ❌ 登录失败 ({err_hint})")
+            return account_results
 
-            print(f"  ✅ 登录成功！进入后台页面: {page.url}", flush=True)
+        print(f"  ✅ 登录成功！当前页面: {driver.current_url}", flush=True)
 
-            # 2. 遍历续期每个服务器
-            for sid in server_ids:
-                short_id = sid[:8]
-                server_url = f"{BASE_URL}/server/{short_id}"
-                print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
-                page.goto(server_url, wait_until="domcontentloaded", timeout=60000)
-                time.sleep(4)
+        # 2. 依次续期服务器
+        for sid in server_ids:
+            short_id = sid[:8]
+            server_url = f"{BASE_URL}/server/{short_id}"
+            print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
+            driver.get(server_url)
+            time.sleep(4)
 
-                renew_btn = page.locator("button:has-text('Renew'), button:has-text('📅 Renew')").first
-                if renew_btn.count() == 0:
-                    print(f"  ⚠️ 未找到 Renew 按钮", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
-                    continue
+            # 点击 Renew 按钮
+            if not driver.is_element_visible("button:contains('Renew')"):
+                print(f"  ⚠️ 未找到 Renew 按钮", flush=True)
+                account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
+                continue
 
-                print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
-                renew_btn.click()
-                time.sleep(2)
+            print(f"  👉 点击 [Renew] 按钮...", flush=True)
+            driver.click("button:contains('Renew')")
+            time.sleep(2)
 
-                read_btn = page.locator("button:has-text('Read Article')").first
-                if read_btn.count() > 0:
-                    print(f"  📰 点击 [Read Article] 并监听新标签页...", flush=True)
-                    with context.expect_page() as new_page_info:
-                        read_btn.click()
-                    
+            # 点击 Read Article
+            if driver.is_element_visible("button:contains('Read Article')"):
+                print(f"  📰 点击 [Read Article] ...", flush=True)
+                main_window = driver.current_window_handle
+                driver.click("button:contains('Read Article')")
+                
+                print(f"  ⏳ 模拟阅读文章，等待 16 秒...", flush=True)
+                time.sleep(16)
+
+                # 切回控制台标签页
+                for handle in driver.window_handles:
+                    if handle != main_window:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                driver.switch_to.window(main_window)
+            else:
+                time.sleep(5)
+
+            # 等待 Cloudflare Turnstile 并点击 Claim Renewal
+            print(f"  🛡️ 等待弹窗 Turnstile 人机验证通过...", flush=True)
+            driver.uc_gui_click_captcha()
+            time.sleep(3)
+
+            claim_selector = "button:contains('Claim Renewal'), button:contains('Claim')"
+            claim_clicked = False
+
+            for _ in range(15):
+                if driver.is_element_visible(claim_selector):
                     try:
-                        ad_page = new_page_info.value
-                        print(f"  ⏳ 模拟阅读等待 16 秒...", flush=True)
-                        time.sleep(16)
-                        ad_page.close()
-                        print(f"  🗞️ 关闭文章页", flush=True)
-                    except Exception:
-                        print(f"  ⏳ 等待 16 秒...", flush=True)
-                        time.sleep(16)
-                else:
-                    time.sleep(5)
-
-                page.bring_to_front()
-                time.sleep(2)
-
-                print(f"  🛡️ 等待弹窗 Turnstile 验证通过...", flush=True)
-                solve_turnstile_if_present(page)
-
-                claim_btn = page.locator("button:has-text('Claim Renewal'), button:has-text('Claim')").first
-                for _ in range(15):
-                    if claim_btn.count() > 0 and claim_btn.is_enabled():
+                        driver.click(claim_selector)
+                        claim_clicked = True
                         break
-                    time.sleep(1)
+                    except Exception:
+                        pass
+                time.sleep(1)
 
-                if claim_btn.count() > 0 and claim_btn.is_enabled():
-                    print(f"  🎉 点击 [Claim Renewal] 完成续期！", flush=True)
-                    claim_btn.click()
-                    time.sleep(4)
-                    print(f"  ✅ 服务器 {short_id} 续期成功！", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: ✅ 续期成功 (+7天)")
+            if claim_clicked:
+                time.sleep(4)
+                print(f"  🎉 点击 [Claim Renewal] 完成续期！", flush=True)
+                account_results.append(f"• 服务器 `{short_id}`: ✅ 续期成功 (+7天)")
+            else:
+                body_text = driver.get_text("body")
+                if "limit" in body_text.lower() or "cooldown" in body_text.lower():
+                    print(f"  ⏭️ 该服务器处于冷却期或已达续期上限", flush=True)
+                    account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达上限/冷却中")
                 else:
-                    modal_text = page.locator("[role='dialog'], .modal, div").all_inner_texts()
-                    full_text = " ".join(modal_text)
-                    if "limit" in full_text.lower() or "cooldown" in full_text.lower():
-                        print(f"  ⏭️ 该服务器处于冷却期或已达续期上限", flush=True)
-                        account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达上限/冷却中")
-                    else:
-                        print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
-                        account_results.append(f"• 服务器 `{short_id}`: ❌ Claim 按钮未就绪")
+                    print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
+                    account_results.append(f"• 服务器 `{short_id}`: ❌ Claim 按钮未就绪")
 
-        except Exception as e:
-            print(f"❌ 流程发生异常: {e}", flush=True)
-            account_results.append(f"• {label}: ❌ 执行异常: {str(e)[:60]}")
-        finally:
-            browser.close()
+    except Exception as e:
+        print(f"❌ 流程发生异常: {e}", flush=True)
+        account_results.append(f"• {label}: ❌ 执行异常: {str(e)[:60]}")
+    finally:
+        driver.quit()
 
     return account_results
 
