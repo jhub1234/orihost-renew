@@ -21,8 +21,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install "requests[socks]" playwright
-          playwright install chromium --with-deps
+          pip install "requests[socks]" seleniumbase
+          sbase install uc_driver
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
@@ -30,8 +30,6 @@ jobs:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           nohup bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh) > proxy.log 2>&1 &
-          
-          # 循环检测代理端口是否就绪（最多等待 30 秒）
           for i in {1..30}; do
             if nc -z 127.0.0.1 1080 2>/dev/null; then
               echo "✅ SOCKS5 代理端口 1080 已就绪！"
@@ -40,7 +38,6 @@ jobs:
             echo "⏳ 等待代理启动中 ($i/30)..."
             sleep 1
           done
-          
           cat proxy.log || true
 
       - name: Run Orihost Renew
