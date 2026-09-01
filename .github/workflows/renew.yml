@@ -21,6 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y xvfb
           pip install "requests[socks]" seleniumbase
           sbase install uc_driver
 
@@ -58,4 +59,4 @@ jobs:
 
           # 代理端口
           ORIHOST_PROXY: socks5://127.0.0.1:1080
-        run: python -u orihost_renew.py
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u orihost_renew.py
