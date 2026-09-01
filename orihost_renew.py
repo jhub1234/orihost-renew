@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (天数精准比对与动态反馈版)
+# Orihost 自动续期脚本 (JS 穿透点击 + 遮罩层清除版)
 # ============================================================
 import os
 import re
@@ -119,6 +119,30 @@ def get_current_renewal_days(driver):
     return None
 
 
+def remove_ad_overlays(driver):
+    """清除可能阻挡点击的广告全屏遮罩 iframe"""
+    try:
+        driver.execute_script("""
+            const iframes = document.querySelectorAll('iframe[style*="z-index"], iframe[style*="fixed"]');
+            iframes.forEach(el => {
+                if (!el.src.includes('turnstile') && !el.src.includes('challenges.cloudflare')) {
+                    el.remove();
+                }
+            });
+        """)
+    except Exception:
+        pass
+
+
+def safe_click(driver, element):
+    """先尝试常规点击，遇到拦截则自动回退为 JS 穿透点击"""
+    try:
+        element.click()
+    except Exception:
+        remove_ad_overlays(driver)
+        driver.execute_script("arguments[0].click();", element)
+
+
 def process_account(acc):
     username = acc["username"]
     password = acc["password"]
@@ -157,7 +181,8 @@ def process_account(acc):
 
         print("  🔑 正在提交登录...", flush=True)
         try:
-            driver.click("button[type='submit']")
+            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            safe_click(driver, submit_btn)
         except Exception:
             pwd_elem.send_keys(Keys.RETURN)
 
@@ -204,7 +229,7 @@ def process_account(acc):
                 continue
 
             print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
-            renew_elements[0].click()
+            safe_click(driver, renew_elements[0])
             time.sleep(3)
 
             # 点击 Read Article
@@ -213,7 +238,7 @@ def process_account(acc):
             if read_elements and read_elements[0].is_displayed():
                 print(f"  📰 点击 [Read Article] 弹窗...", flush=True)
                 main_window = driver.current_window_handle
-                read_elements[0].click()
+                safe_click(driver, read_elements[0])
                 
                 print(f"  ⏳ 模拟阅读新闻文章，等待 17 秒...", flush=True)
                 time.sleep(17)
@@ -242,22 +267,15 @@ def process_account(acc):
                 claim_elements = driver.find_elements(By.XPATH, claim_xpath)
                 for btn in claim_elements:
                     if btn.is_displayed():
-                        try:
-                            try:
-                                btn.click()
-                            except Exception:
-                                driver.execute_script("arguments[0].click();", btn)
-                            claim_clicked = True
-                            break
-                        except Exception:
-                            pass
+                        safe_click(driver, btn)
+                        claim_clicked = True
+                        break
                 if claim_clicked:
                     break
                 time.sleep(1)
 
             if claim_clicked:
                 time.sleep(4)
-                # 刷新页面获取最新天数进行二次校验
                 driver.refresh()
                 time.sleep(4)
                 days_after = get_current_renewal_days(driver)
@@ -274,9 +292,9 @@ def process_account(acc):
                     account_results.append(f"• 服务器 `{short_id}`: ✅ 续期动作已完成")
             else:
                 cur_text = driver.get_text("body")
-                if "cooldown" in cur_text.lower() or "limit" in cur_text.lower():
-                    print(f"  ⏭️ 该服务器处于冷却期或已达上限", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达上限/冷却中")
+                if any(k in cur_text.lower() for k in ["cooldown", "limit", "renewed", "10 days", "3 days"]):
+                    print(f"  ⏭️ 该服务器处于冷却期或已达上限（无需重复续期）", flush=True)
+                    account_results.append(f"• 服务器 `{short_id}`: ⏭️ 维持满期/冷却中")
                 else:
                     print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
                     account_results.append(f"• 服务器 `{short_id}`: ❌ Claim 按钮未就绪")
