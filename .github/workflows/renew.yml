@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests playwright
+          pip install "requests[socks]" playwright
           playwright install chromium --with-deps
 
       - name: ⚙ 设置代理 (sing-box)
@@ -49,6 +49,6 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
 
-          # 使用实际生效的 SOCKS5 端口
+          # SOCKS5 代理端口
           ORIHOST_PROXY: socks5://127.0.0.1:1080
         run: python -u orihost_renew.py
