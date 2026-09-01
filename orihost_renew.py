@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (SeleniumBase UC + 智能等待版)
+# Orihost 自动续期脚本 (SeleniumBase UC + 弹窗精准识别版)
 # ============================================================
 import os
 import sys
@@ -174,7 +174,7 @@ def process_account(acc):
             print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
             driver.get(server_url)
 
-            # 显式等待 Renew 按钮渲染出现（最长等待 25 秒）
+            # 显式等待 Renew 按钮渲染
             renew_xpath = "//button[contains(., 'Renew') or contains(., 'renew')]"
             try:
                 driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=25)
@@ -183,13 +183,20 @@ def process_account(acc):
 
             renew_elements = driver.find_elements(By.XPATH, renew_xpath)
             if not renew_elements:
-                print(f"  ⚠️ 控制台未加载出 Renew 按钮，可能非免费实例或页面未就绪", flush=True)
+                print(f"  ⚠️ 控制台未加载出 Renew 按钮", flush=True)
                 account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
                 continue
 
             print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
             renew_elements[0].click()
             time.sleep(3)
+
+            # 检查弹窗是否直接提示冷却/上限
+            modal_text = driver.get_text("body")
+            if any(k in modal_text.lower() for k in ["cooldown", "limit reached", "already renewed", "cannot renew"]):
+                print(f"  ⏭️ 该服务器当前处于冷却期或已达续期上限", flush=True)
+                account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达续期上限/冷却中")
+                continue
 
             # 点击 Read Article
             read_xpath = "//button[contains(., 'Read Article') or contains(., 'Article')]"
@@ -199,8 +206,8 @@ def process_account(acc):
                 main_window = driver.current_window_handle
                 read_elements[0].click()
                 
-                print(f"  ⏳ 模拟阅读新闻文章，等待 16 秒...", flush=True)
-                time.sleep(16)
+                print(f"  ⏳ 模拟阅读新闻文章，等待 17 秒...", flush=True)
+                time.sleep(17)
 
                 # 关闭弹出的文章标签页并切回
                 for handle in driver.window_handles:
@@ -211,26 +218,35 @@ def process_account(acc):
                         except Exception:
                             pass
                 driver.switch_to.window(main_window)
+                time.sleep(2)
             else:
                 time.sleep(5)
 
             # 等待 Cloudflare Turnstile 验证通过
             print(f"  🛡️ 等待弹窗 Turnstile 人机验证通过...", flush=True)
             solve_turnstile(driver, max_wait=20)
+            time.sleep(2)
 
-            # 等待并点击 Claim Renewal
-            claim_xpath = "//button[contains(., 'Claim Renewal') or contains(., 'Claim')]"
+            # 多策略寻找并点击 Claim Renewal
+            claim_xpath = "//button[contains(., 'Claim') or contains(., 'claim') or contains(., 'Renewal')]"
             claim_clicked = False
 
             for _ in range(15):
                 claim_elements = driver.find_elements(By.XPATH, claim_xpath)
-                if claim_elements and claim_elements[0].is_displayed() and claim_elements[0].is_enabled():
-                    try:
-                        claim_elements[0].click()
-                        claim_clicked = True
-                        break
-                    except Exception:
-                        pass
+                for btn in claim_elements:
+                    if btn.is_displayed():
+                        try:
+                            # 优先常规点击，若失败则用 JS 穿透点击
+                            try:
+                                btn.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", btn)
+                            claim_clicked = True
+                            break
+                        except Exception:
+                            pass
+                if claim_clicked:
+                    break
                 time.sleep(1)
 
             if claim_clicked:
@@ -238,9 +254,10 @@ def process_account(acc):
                 print(f"  🎉 点击 [Claim Renewal] 完成续期！", flush=True)
                 account_results.append(f"• 服务器 `{short_id}`: ✅ 续期成功 (+7天)")
             else:
-                body_text = driver.get_text("body")
-                if "limit" in body_text.lower() or "cooldown" in body_text.lower():
-                    print(f"  ⏭️ 该服务器处于冷却期或已达续期上限", flush=True)
+                # 再次检查页面文本确认是否是因为刚续期处于冷却
+                cur_text = driver.get_text("body")
+                if any(k in cur_text.lower() for k in ["cooldown", "limit", "renewed", "3 days", "7 days", "14 days"]):
+                    print(f"  ⏭️ 该服务器处于冷却期或已达续期上限（无需重复续期）", flush=True)
                     account_results.append(f"• 服务器 `{short_id}`: ⏭️ 已达上限/冷却中")
                 else:
                     print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
