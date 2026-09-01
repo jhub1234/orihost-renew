@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (SeleniumBase UC + 物理点击过盾版)
+# Orihost 自动续期脚本 (SeleniumBase UC + 智能等待版)
 # ============================================================
 import os
 import sys
@@ -98,7 +98,6 @@ def solve_turnstile(driver, max_wait=20):
         except Exception:
             pass
 
-        # 每隔 2 秒尝试一次物理定位点击
         if i % 2 == 0:
             try:
                 driver.uc_gui_click_captcha()
@@ -120,12 +119,11 @@ def process_account(acc):
     driver = Driver(uc=True, headless=False, proxy=UC_PROXY)
 
     try:
-        # 1. 打开登录页面
+        # 1. 登录
         print(f"  🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
         time.sleep(3)
 
-        # 定位用户名字段并输入
         user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
         driver.wait_for_element_visible(user_selector, timeout=25)
         
@@ -135,7 +133,6 @@ def process_account(acc):
         user_elem.send_keys(username)
         time.sleep(1)
 
-        # 定位密码框并输入
         pwd_elem = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
         pwd_elem.click()
         pwd_elem.clear()
@@ -148,12 +145,10 @@ def process_account(acc):
 
         print("  🔑 正在提交登录...", flush=True)
         try:
-            # 优先点击 Sign In 提交按钮
             driver.click("button[type='submit']")
         except Exception:
             pwd_elem.send_keys(Keys.RETURN)
 
-        # 等待页面离开 /auth/login
         for _ in range(12):
             if "/auth/login" not in driver.current_url:
                 break
@@ -178,46 +173,60 @@ def process_account(acc):
             server_url = f"{BASE_URL}/server/{short_id}"
             print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
             driver.get(server_url)
-            time.sleep(4)
 
-            # 点击 Renew 按钮
-            if not driver.is_element_visible("button:contains('Renew')"):
-                print(f"  ⚠️ 未找到 Renew 按钮", flush=True)
+            # 显式等待 Renew 按钮渲染出现（最长等待 25 秒）
+            renew_xpath = "//button[contains(., 'Renew') or contains(., 'renew')]"
+            try:
+                driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=25)
+            except Exception:
+                pass
+
+            renew_elements = driver.find_elements(By.XPATH, renew_xpath)
+            if not renew_elements:
+                print(f"  ⚠️ 控制台未加载出 Renew 按钮，可能非免费实例或页面未就绪", flush=True)
                 account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
                 continue
 
-            print(f"  👉 点击 [Renew] 按钮...", flush=True)
-            driver.click("button:contains('Renew')")
-            time.sleep(2)
+            print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
+            renew_elements[0].click()
+            time.sleep(3)
 
             # 点击 Read Article
-            if driver.is_element_visible("button:contains('Read Article')"):
-                print(f"  📰 点击 [Read Article] ...", flush=True)
+            read_xpath = "//button[contains(., 'Read Article') or contains(., 'Article')]"
+            read_elements = driver.find_elements(By.XPATH, read_xpath)
+            if read_elements and read_elements[0].is_displayed():
+                print(f"  📰 点击 [Read Article] 弹窗...", flush=True)
                 main_window = driver.current_window_handle
-                driver.click("button:contains('Read Article')")
+                read_elements[0].click()
                 
-                print(f"  ⏳ 模拟阅读文章，等待 16 秒...", flush=True)
+                print(f"  ⏳ 模拟阅读新闻文章，等待 16 秒...", flush=True)
                 time.sleep(16)
 
+                # 关闭弹出的文章标签页并切回
                 for handle in driver.window_handles:
                     if handle != main_window:
-                        driver.switch_to.window(handle)
-                        driver.close()
+                        try:
+                            driver.switch_to.window(handle)
+                            driver.close()
+                        except Exception:
+                            pass
                 driver.switch_to.window(main_window)
             else:
                 time.sleep(5)
 
-            # 等待 Cloudflare Turnstile 验证
-            print(f"  🛡️ 等待弹窗 Turnstile 验证通过...", flush=True)
+            # 等待 Cloudflare Turnstile 验证通过
+            print(f"  🛡️ 等待弹窗 Turnstile 人机验证通过...", flush=True)
             solve_turnstile(driver, max_wait=20)
 
-            claim_selector = "button:contains('Claim Renewal'), button:contains('Claim')"
+            # 等待并点击 Claim Renewal
+            claim_xpath = "//button[contains(., 'Claim Renewal') or contains(., 'Claim')]"
             claim_clicked = False
 
             for _ in range(15):
-                if driver.is_element_visible(claim_selector):
+                claim_elements = driver.find_elements(By.XPATH, claim_xpath)
+                if claim_elements and claim_elements[0].is_displayed() and claim_elements[0].is_enabled():
                     try:
-                        driver.click(claim_selector)
+                        claim_elements[0].click()
                         claim_clicked = True
                         break
                     except Exception:
