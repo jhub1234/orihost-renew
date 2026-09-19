@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (JS 穿透点击 + 遮罩层清除版)
+# Orihost 自动续期脚本 (含电源状态检测与自动开机版)
 # ============================================================
 import os
 import re
@@ -78,7 +78,7 @@ def send_telegram(message: str):
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message}, timeout=15)
+        requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=15)
         print("  ✅ Telegram 消息推送成功", flush=True)
     except Exception as e:
         print(f"  ❌ Telegram 发送失败: {e}", flush=True)
@@ -117,6 +117,44 @@ def get_current_renewal_days(driver):
     except Exception:
         pass
     return None
+
+
+def get_power_status(driver):
+    """检测服务器运行/停止状态"""
+    try:
+        body = driver.get_text("body")
+        if "App is running" in body:
+            return "ONLINE"
+        if "App is stopped" in body or "OFFLINE" in body.upper():
+            return "STOPPED"
+
+        start_btn = driver.find_elements(By.XPATH, "//button[contains(., 'Start')]")
+        stop_btn = driver.find_elements(By.XPATH, "//button[contains(., 'Stop')]")
+        if stop_btn and stop_btn[0].is_enabled():
+            return "ONLINE"
+        if start_btn and start_btn[0].is_enabled():
+            return "STOPPED"
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
+def ensure_server_running(driver):
+    """如果处于停止状态，自动点击 Start 开机"""
+    status = get_power_status(driver)
+    if status == "STOPPED":
+        print("  ⚡ 检测到服务器处于已停止状态，尝试执行 Start 开机...", flush=True)
+        start_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start')]")
+        for btn in start_btns:
+            if btn.is_displayed() and btn.is_enabled():
+                safe_click(driver, btn)
+                print("  👉 已点击 Start 开机按钮！", flush=True)
+                time.sleep(4)
+                return "已执行开机"
+        return "停止(开机按钮未就绪)"
+    elif status == "ONLINE":
+        return "正常运行"
+    return "未知状态"
 
 
 def remove_ad_overlays(driver):
@@ -204,19 +242,23 @@ def process_account(acc):
 
         print(f"  ✅ 登录成功！当前页面: {driver.current_url}", flush=True)
 
-        # 2. 依次续期服务器
+        # 2. 依次巡检与续期服务器
         for sid in server_ids:
             short_id = sid[:8]
             server_url = f"{BASE_URL}/server/{short_id}"
             print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
             driver.get(server_url)
 
-            # 显式等待 Renew 按钮渲染
+            # 显式等待 Renew 按钮或控制台渲染
             renew_xpath = "//button[contains(., 'Renew') or contains(., 'renew')]"
             try:
                 driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=25)
             except Exception:
                 pass
+
+            # 检查电源状态并在需要时开机
+            power_status = ensure_server_running(driver)
+            print(f"  🖥️ 服务器电源状态: {power_status}", flush=True)
 
             days_before = get_current_renewal_days(driver)
             if days_before is not None:
@@ -225,7 +267,7 @@ def process_account(acc):
             renew_elements = driver.find_elements(By.XPATH, renew_xpath)
             if not renew_elements:
                 print(f"  ⚠️ 控制台未加载出 Renew 按钮", flush=True)
-                account_results.append(f"• 服务器 `{short_id}`: ⚠️ 未找到 Renew 按钮")
+                account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ⚠️ 未找到 Renew 按钮")
                 continue
 
             print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
@@ -283,21 +325,21 @@ def process_account(acc):
                 if days_after is not None:
                     if days_before is not None and days_after > days_before:
                         print(f"  🎉 续期成功！天数由 {days_before} 天增加至 {days_after} 天", flush=True)
-                        account_results.append(f"• 服务器 `{short_id}`: ✅ 续期成功 ({days_before}天 ➜ {days_after}天)")
+                        account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ✅ 续期成功 ({days_before}天 ➜ {days_after}天)")
                     else:
                         print(f"  ⏭️ 当前已处于上限 (剩余 {days_after} 天)", flush=True)
-                        account_results.append(f"• 服务器 `{short_id}`: ⏭️ 维持满期 ({days_after}天)")
+                        account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ⏭️ 维持满期 ({days_after}天)")
                 else:
                     print(f"  ✅ 续期动作已触发完成", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: ✅ 续期动作已完成")
+                    account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ✅ 续期动作已完成")
             else:
                 cur_text = driver.get_text("body")
                 if any(k in cur_text.lower() for k in ["cooldown", "limit", "renewed", "10 days", "3 days"]):
                     print(f"  ⏭️ 该服务器处于冷却期或已达上限（无需重复续期）", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: ⏭️ 维持满期/冷却中")
+                    account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ⏭️ 维持满期/冷却中")
                 else:
                     print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: ❌ Claim 按钮未就绪")
+                    account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ❌ Claim 按钮未就绪")
 
     except Exception as e:
         print(f"❌ 流程发生异常: {e}", flush=True)
@@ -320,7 +362,7 @@ def main():
 
     now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     summary_text = (
-        f"🖥 *Orihost 服务器自动续期汇总*\n\n"
+        f"🖥 *Orihost 服务器自动巡检与续期汇总*\n\n"
         + "\n".join(all_summary)
         + f"\n\n⏰ 执行时间: `{now}`"
     )
