@@ -1,10 +1,9 @@
 name: Orihost Auto Renew
 
 on:
-  schedule:
-    # 每 3 天一次，UTC 10:00 = 北京时间 18:00
-    - cron: '0 10 */3 * *'
   workflow_dispatch: # 支持手动触发
+  repository_dispatch:
+    types: [ori_renew] # 接受外部面板唤醒
 
 jobs:
   renew:
@@ -28,7 +27,7 @@ jobs:
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
         env:
-          NODE_LINK: ${{ secrets.NODE_LINK }}
+          NODE_LINK: ${{ secrets.ORIHOST_NODE_LINK || secrets.NODE_LINK }}
         run: |
           nohup bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh) > proxy.log 2>&1 &
           for i in {1..30}; do
