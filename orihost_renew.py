@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# Orihost 自动续期脚本 (含电源状态检测与自动开机版)
+# Orihost 自动续期与电源巡检 (高清图文卡片推送版)
 # ============================================================
+import html
 import os
 import re
+import socket
+import subprocess
 import sys
 import time
-import socket
+from datetime import datetime, timedelta, timezone
 import requests
-from datetime import datetime, timezone, timedelta
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -21,6 +23,7 @@ ORIHOST_PROXY = os.environ.get("ORIHOST_PROXY", "").strip()
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
 
+
 def is_proxy_alive(proxy_str: str) -> bool:
     if not proxy_str:
         return False
@@ -31,6 +34,7 @@ def is_proxy_alive(proxy_str: str) -> bool:
             return True
     except Exception:
         return False
+
 
 UC_PROXY = None
 if ORIHOST_PROXY and is_proxy_alive(ORIHOST_PROXY):
@@ -72,20 +76,50 @@ if not ACCOUNTS:
     sys.exit(1)
 
 
-def send_telegram(message: str):
+def tg_send(text: str, photo_path: str = None):
+    """支持图文卡片发送"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("⚠️ Telegram 未配置，跳过推送", flush=True)
+        print("⚠️ 未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知。")
         return
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=15)
-        print("  ✅ Telegram 消息推送成功", flush=True)
+        if photo_path and os.path.exists(photo_path) and os.path.getsize(photo_path) > 1000:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+            with open(photo_path, "rb") as f:
+                requests.post(
+                    url,
+                    data={"chat_id": TG_CHAT_ID, "caption": text, "parse_mode": "HTML"},
+                    files={"photo": f},
+                    timeout=30,
+                )
+        else:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+            requests.post(
+                url,
+                data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
+                timeout=30,
+            )
+        print("  ✅ TG 图文通知发送成功", flush=True)
     except Exception as e:
-        print(f"  ❌ Telegram 发送失败: {e}", flush=True)
+        print(f"  ⚠️ TG 通知异常: {e}", flush=True)
+
+
+def capture_screenshot(driver, save_path="ori_result.png"):
+    """安全截屏"""
+    try:
+        driver.save_screenshot(save_path)
+        if os.path.exists(save_path) and os.path.getsize(save_path) > 15000:
+            return True
+    except Exception:
+        pass
+    try:
+        subprocess.run(["scrot", "-u", save_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        pass
+    return True
 
 
 def solve_turnstile(driver, max_wait=20):
-    """检测并点击过 Cloudflare Turnstile"""
+    """检测并点击 Cloudflare Turnstile"""
     for i in range(max_wait):
         try:
             token = driver.execute_script("""
@@ -119,46 +153,46 @@ def get_current_renewal_days(driver):
     return None
 
 
-def get_power_status(driver):
-    """检测服务器运行/停止状态"""
-    try:
-        body = driver.get_text("body")
-        if "App is running" in body:
-            return "ONLINE"
-        if "App is stopped" in body or "OFFLINE" in body.upper():
-            return "STOPPED"
+def get_power_status(driver, max_wait=6):
+    """精准判定电源状态"""
+    for _ in range(max_wait):
+        try:
+            body = driver.get_text("body")
+            if "App is running" in body:
+                return "ONLINE"
+            if "App is stopped" in body:
+                return "STOPPED"
 
-        start_btn = driver.find_elements(By.XPATH, "//button[contains(., 'Start')]")
-        stop_btn = driver.find_elements(By.XPATH, "//button[contains(., 'Stop')]")
-        if stop_btn and stop_btn[0].is_enabled():
-            return "ONLINE"
-        if start_btn and start_btn[0].is_enabled():
-            return "STOPPED"
-    except Exception:
-        pass
-    return "UNKNOWN"
+            stop_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Stop')]")
+            if stop_btns and stop_btns[0].is_displayed() and stop_btns[0].is_enabled():
+                return "ONLINE"
+
+            start_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start')]")
+            if start_btns and start_btns[0].is_displayed() and start_btns[0].is_enabled():
+                return "STOPPED"
+        except Exception:
+            pass
+        time.sleep(1)
+    return "ONLINE"
 
 
 def ensure_server_running(driver):
-    """如果处于停止状态，自动点击 Start 开机"""
+    """如确认关机，自动点 Start"""
     status = get_power_status(driver)
     if status == "STOPPED":
-        print("  ⚡ 检测到服务器处于已停止状态，尝试执行 Start 开机...", flush=True)
+        print("  ⚡ 确认处于停止状态，点击 Start 开机...", flush=True)
         start_btns = driver.find_elements(By.XPATH, "//button[contains(., 'Start')]")
         for btn in start_btns:
             if btn.is_displayed() and btn.is_enabled():
                 safe_click(driver, btn)
                 print("  👉 已点击 Start 开机按钮！", flush=True)
                 time.sleep(4)
-                return "已执行开机"
-        return "停止(开机按钮未就绪)"
-    elif status == "ONLINE":
-        return "正常运行"
-    return "未知状态"
+                return "STOPPED", "⚡ 已执行开机"
+        return "STOPPED", "⚠️ 停止 (开机按钮未就绪)"
+    return "ONLINE", "正常运行"
 
 
 def remove_ad_overlays(driver):
-    """清除可能阻挡点击的广告全屏遮罩 iframe"""
     try:
         driver.execute_script("""
             const iframes = document.querySelectorAll('iframe[style*="z-index"], iframe[style*="fixed"]');
@@ -173,12 +207,123 @@ def remove_ad_overlays(driver):
 
 
 def safe_click(driver, element):
-    """先尝试常规点击，遇到拦截则自动回退为 JS 穿透点击"""
     try:
         element.click()
     except Exception:
         remove_ad_overlays(driver)
         driver.execute_script("arguments[0].click();", element)
+
+
+def process_server(driver, sid, label):
+    short_id = sid[:8]
+    server_url = f"{BASE_URL}/server/{short_id}"
+    print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
+    driver.get(server_url)
+
+    # 等待页面主容器加载
+    renew_xpath = "//button[contains(., 'Renew') or contains(., 'renew')]"
+    try:
+        driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=25)
+    except Exception:
+        pass
+
+    # 1. 检测电源并处理
+    power_status, power_action = ensure_server_running(driver)
+    days_before = get_current_renewal_days(driver)
+    days_before_str = f"{days_before} 天" if days_before is not None else "未知"
+    print(f"  🖥️ 电源状态: {power_status} ({power_action}) | 当前剩余: {days_before_str}", flush=True)
+
+    renew_elements = driver.find_elements(By.XPATH, renew_xpath)
+    action_desc = "⚠️ 未找到控制台 Renew 按钮"
+    days_after_str = days_before_str
+
+    if renew_elements:
+        print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
+        safe_click(driver, renew_elements[0])
+        time.sleep(3)
+
+        read_xpath = "//button[contains(., 'Read Article') or contains(., 'Article')]"
+        read_elements = driver.find_elements(By.XPATH, read_xpath)
+        if read_elements and read_elements[0].is_displayed():
+            print(f"  📰 点击 [Read Article] 弹窗...", flush=True)
+            main_window = driver.current_window_handle
+            safe_click(driver, read_elements[0])
+
+            print(f"  ⏳ 模拟阅读新闻文章，等待 17 秒...", flush=True)
+            time.sleep(17)
+
+            for handle in driver.window_handles:
+                if handle != main_window:
+                    try:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                    except Exception:
+                        pass
+            driver.switch_to.window(main_window)
+            time.sleep(2)
+        else:
+            time.sleep(4)
+
+        # 验证 Turnstile
+        print(f"  🛡️ 等待弹窗 Turnstile 人机验证通过...", flush=True)
+        solve_turnstile(driver, max_wait=20)
+        time.sleep(2)
+
+        claim_xpath = "//button[contains(., 'Claim') or contains(., 'claim') or contains(., 'Renewal')]"
+        claim_clicked = False
+
+        for _ in range(15):
+            claim_elements = driver.find_elements(By.XPATH, claim_xpath)
+            for btn in claim_elements:
+                if btn.is_displayed():
+                    safe_click(driver, btn)
+                    claim_clicked = True
+                    break
+            if claim_clicked:
+                break
+            time.sleep(1)
+
+        if claim_clicked:
+            time.sleep(4)
+            driver.refresh()
+            time.sleep(4)
+            days_after = get_current_renewal_days(driver)
+            if days_after is not None:
+                days_after_str = f"{days_after} 天"
+                if days_before is not None and days_after > days_before:
+                    action_desc = f"✅ 成功续期 (+7天)"
+                else:
+                    action_desc = f"⏭️ 当前处于上限，维持满期"
+            else:
+                action_desc = "✅ 续期动作已触发"
+        else:
+            cur_text = driver.get_text("body")
+            if any(k in cur_text.lower() for k in ["cooldown", "limit", "renewed", "10 days", "3 days"]):
+                action_desc = "⏭️ 处于冷却期/维持满期"
+            else:
+                action_desc = "❌ Claim 按钮未就绪"
+
+    # 截取控制台最新画面
+    shot_name = f"ori_{short_id}.png"
+    time.sleep(2)
+    capture_screenshot(driver, shot_name)
+
+    now_str = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # 构建富文本图文消息
+    msg = (
+        f"📋 <b>Orihost 续期巡检报告</b>\n\n"
+        f"🏷️ <b>账号归属：</b><code>{label}</code>\n"
+        f"🖥️ <b>实例短 ID：</b><code>{short_id}</code>\n"
+        f"🔌 <b>实例电源：</b><code>{power_status}</code>\n"
+        f"⚡ <b>电源动作：</b><code>{power_action}</code>\n"
+        f"⏳ <b>续期前天数：</b><code>{days_before_str}</code>\n"
+        f"⌛ <b>续期后天数：</b><code>{days_after_str}</code>\n"
+        f"📊 <b>执行结果：</b><code>{action_desc}</code>\n"
+        f"⏰ <b>执行时间：</b><code>{now_str}</code>"
+    )
+
+    tg_send(msg, photo_path=shot_name)
 
 
 def process_account(acc):
@@ -188,19 +333,17 @@ def process_account(acc):
     label = acc["label"]
 
     print(f"\n{'='*40}\n🚀 正在处理 {label} (用户: {username[:3]}***)\n{'='*40}", flush=True)
-    account_results = []
 
     driver = Driver(uc=True, headless=False, proxy=UC_PROXY)
 
     try:
-        # 1. 登录
         print(f"  🌐 正在打开登录页面: {LOGIN_URL} ...", flush=True)
         driver.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
         time.sleep(3)
 
         user_selector = "input[name='user'], input[name='username'], input[name='email'], input[type='text'], input[type='email']"
         driver.wait_for_element_visible(user_selector, timeout=25)
-        
+
         user_elem = driver.find_element(By.CSS_SELECTOR, user_selector)
         user_elem.click()
         user_elem.clear()
@@ -230,143 +373,32 @@ def process_account(acc):
             time.sleep(1)
 
         if "/auth/login" in driver.current_url:
-            body_text = driver.get_text("body")
-            err_hint = "页面未跳转"
-            for line in body_text.split("\n"):
-                if any(k in line.lower() for k in ["invalid", "incorrect", "credentials", "captcha", "turnstile"]):
-                    err_hint = line.strip()
-                    break
-            print(f"  ❌ 登录未成功跳转，提示: {err_hint}", flush=True)
-            account_results.append(f"• {label}: ❌ 登录失败 ({err_hint})")
-            return account_results
+            print("  ❌ 登录未成功跳转！", flush=True)
+            capture_screenshot(driver, "ori_login_failed.png")
+            tg_send(f"🔴 <b>Orihost 登录失败 ({label})</b>", photo_path="ori_login_failed.png")
+            return
 
         print(f"  ✅ 登录成功！当前页面: {driver.current_url}", flush=True)
 
-        # 2. 依次巡检与续期服务器
         for sid in server_ids:
-            short_id = sid[:8]
-            server_url = f"{BASE_URL}/server/{short_id}"
-            print(f"\n🔄 [{short_id}] 打开服务器控制台: {server_url} ...", flush=True)
-            driver.get(server_url)
-
-            # 显式等待 Renew 按钮或控制台渲染
-            renew_xpath = "//button[contains(., 'Renew') or contains(., 'renew')]"
-            try:
-                driver.wait_for_element_visible(renew_xpath, by=By.XPATH, timeout=25)
-            except Exception:
-                pass
-
-            # 检查电源状态并在需要时开机
-            power_status = ensure_server_running(driver)
-            print(f"  🖥️ 服务器电源状态: {power_status}", flush=True)
-
-            days_before = get_current_renewal_days(driver)
-            if days_before is not None:
-                print(f"  📊 当前服务器剩余续期天数: {days_before} 天", flush=True)
-
-            renew_elements = driver.find_elements(By.XPATH, renew_xpath)
-            if not renew_elements:
-                print(f"  ⚠️ 控制台未加载出 Renew 按钮", flush=True)
-                account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ⚠️ 未找到 Renew 按钮")
-                continue
-
-            print(f"  👉 点击控制台右下角 [Renew] 按钮...", flush=True)
-            safe_click(driver, renew_elements[0])
-            time.sleep(3)
-
-            # 点击 Read Article
-            read_xpath = "//button[contains(., 'Read Article') or contains(., 'Article')]"
-            read_elements = driver.find_elements(By.XPATH, read_xpath)
-            if read_elements and read_elements[0].is_displayed():
-                print(f"  📰 点击 [Read Article] 弹窗...", flush=True)
-                main_window = driver.current_window_handle
-                safe_click(driver, read_elements[0])
-                
-                print(f"  ⏳ 模拟阅读新闻文章，等待 17 秒...", flush=True)
-                time.sleep(17)
-
-                for handle in driver.window_handles:
-                    if handle != main_window:
-                        try:
-                            driver.switch_to.window(handle)
-                            driver.close()
-                        except Exception:
-                            pass
-                driver.switch_to.window(main_window)
-                time.sleep(2)
-            else:
-                time.sleep(5)
-
-            # 等待 Cloudflare Turnstile 验证通过
-            print(f"  🛡️ 等待弹窗 Turnstile 人机验证通过...", flush=True)
-            solve_turnstile(driver, max_wait=20)
-            time.sleep(2)
-
-            claim_xpath = "//button[contains(., 'Claim') or contains(., 'claim') or contains(., 'Renewal')]"
-            claim_clicked = False
-
-            for _ in range(15):
-                claim_elements = driver.find_elements(By.XPATH, claim_xpath)
-                for btn in claim_elements:
-                    if btn.is_displayed():
-                        safe_click(driver, btn)
-                        claim_clicked = True
-                        break
-                if claim_clicked:
-                    break
-                time.sleep(1)
-
-            if claim_clicked:
-                time.sleep(4)
-                driver.refresh()
-                time.sleep(4)
-                days_after = get_current_renewal_days(driver)
-                
-                if days_after is not None:
-                    if days_before is not None and days_after > days_before:
-                        print(f"  🎉 续期成功！天数由 {days_before} 天增加至 {days_after} 天", flush=True)
-                        account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ✅ 续期成功 ({days_before}天 ➜ {days_after}天)")
-                    else:
-                        print(f"  ⏭️ 当前已处于上限 (剩余 {days_after} 天)", flush=True)
-                        account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ⏭️ 维持满期 ({days_after}天)")
-                else:
-                    print(f"  ✅ 续期动作已触发完成", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ✅ 续期动作已完成")
-            else:
-                cur_text = driver.get_text("body")
-                if any(k in cur_text.lower() for k in ["cooldown", "limit", "renewed", "10 days", "3 days"]):
-                    print(f"  ⏭️ 该服务器处于冷却期或已达上限（无需重复续期）", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ⏭️ 维持满期/冷却中")
-                else:
-                    print(f"  ❌ 未能成功点击 Claim Renewal", flush=True)
-                    account_results.append(f"• 服务器 `{short_id}`: 电源 `{power_status}` | ❌ Claim 按钮未就绪")
+            process_server(driver, sid, label)
 
     except Exception as e:
         print(f"❌ 流程发生异常: {e}", flush=True)
-        account_results.append(f"• {label}: ❌ 执行异常: {str(e)[:60]}")
+        capture_screenshot(driver, "ori_error.png")
+        tg_send(f"🔴 <b>Orihost 执行异常 ({label})</b>\n\n<code>{html.escape(str(e))}</code>", photo_path="ori_error.png")
     finally:
         driver.quit()
-
-    return account_results
 
 
 def main():
     print("=" * 45, flush=True)
-    print(" Orihost 自动登录与全真 UI 续期任务", flush=True)
+    print(" Orihost 自动续期巡检启动 (图文推送版)", flush=True)
     print("=" * 45, flush=True)
 
-    all_summary = []
     for acc in ACCOUNTS:
-        results = process_account(acc)
-        all_summary.extend(results)
+        process_account(acc)
 
-    now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
-    summary_text = (
-        f"🖥 *Orihost 服务器自动巡检与续期汇总*\n\n"
-        + "\n".join(all_summary)
-        + f"\n\n⏰ 执行时间: `{now}`"
-    )
-    send_telegram(summary_text)
     print("\n✅ 所有任务执行完毕！", flush=True)
 
 
